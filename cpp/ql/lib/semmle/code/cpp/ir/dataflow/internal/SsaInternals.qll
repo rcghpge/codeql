@@ -153,6 +153,10 @@ private predicate isGlobalDefImpl(
   GlobalLikeVariable v, IRFunction f, int indirection, int indirectionIndex
 ) {
   exists(VariableAddressInstruction vai |
+    // The right-hand side of an initialization of a global variable
+    // creates its own `IRFunction`. We don't want flow into that `IRFunction`
+    // since the variable is only initialized once.
+    not vai.getEnclosingFunction() = v and
     vai.getEnclosingIRFunction() = f and
     vai.getAstVariable() = v and
     isUse(_, _, vai, indirection, indirectionIndex) and
@@ -957,6 +961,8 @@ class GlobalDef extends Definition {
 private module SsaImpl = SsaImplCommon::Make<Location, SsaInput>;
 
 private module DataFlowIntegrationInput implements SsaImpl::DataFlowIntegrationInputSig {
+  private import codeql.util.Boolean
+
   class Expr extends Instruction {
     Expr() {
       exists(IRBlock bb, int i |
@@ -988,10 +994,14 @@ private module DataFlowIntegrationInput implements SsaImpl::DataFlowIntegrationI
     result instanceof FalseEdge
   }
 
+  class GuardValue = Boolean;
+
   class Guard instanceof IRGuards::IRGuardCondition {
     string toString() { result = super.toString() }
 
-    predicate hasBranchEdge(SsaInput::BasicBlock bb1, SsaInput::BasicBlock bb2, boolean branch) {
+    predicate hasValueBranchEdge(
+      SsaInput::BasicBlock bb1, SsaInput::BasicBlock bb2, GuardValue branch
+    ) {
       exists(EdgeKind kind |
         super.getBlock() = bb1 and
         kind = getConditionalEdge(branch) and
@@ -999,12 +1009,14 @@ private module DataFlowIntegrationInput implements SsaImpl::DataFlowIntegrationI
       )
     }
 
-    predicate controlsBranchEdge(SsaInput::BasicBlock bb1, SsaInput::BasicBlock bb2, boolean branch) {
-      this.hasBranchEdge(bb1, bb2, branch)
+    predicate valueControlsBranchEdge(
+      SsaInput::BasicBlock bb1, SsaInput::BasicBlock bb2, GuardValue branch
+    ) {
+      this.hasValueBranchEdge(bb1, bb2, branch)
     }
   }
 
-  predicate guardDirectlyControlsBlock(Guard guard, SsaInput::BasicBlock bb, boolean branch) {
+  predicate guardDirectlyControlsBlock(Guard guard, SsaInput::BasicBlock bb, GuardValue branch) {
     guard.(IRGuards::IRGuardCondition).controls(bb, branch)
   }
 
@@ -1033,7 +1045,8 @@ module BarrierGuardWithIntParam<guardChecksNodeSig/4 guardChecksNode> {
   }
 
   private predicate guardChecks(
-    DataFlowIntegrationInput::Guard g, SsaImpl::Definition def, boolean branch, int indirectionIndex
+    DataFlowIntegrationInput::Guard g, SsaImpl::Definition def,
+    DataFlowIntegrationInput::GuardValue branch, int indirectionIndex
   ) {
     exists(UseImpl use |
       guardChecksNode(g, use.getNode(), branch, indirectionIndex) and
