@@ -1,4 +1,4 @@
-name: Sync from upstream CodeQL
+name: CodeQL Source Tree
 
 on:
   schedule:
@@ -6,6 +6,7 @@ on:
     - cron: '0 3 1 * *'
   workflow_dispatch: {}
 
+# Needed so the workflow token can push commits
 permissions:
   contents: write
 
@@ -14,23 +15,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout fork
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0  # Important to allow merging history
-        persist-credentials: false
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                 # need full history for sync and merges
+          persist-credentials: false     
+          
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-    - name: Add upstream remote
-      run: |
-        git remote add upstream https://github.com/github/codeql.git
-        git fetch upstream
+      - name: Check default branch
+        run: |
+          # If the repo uses a different default branch, change 'main' here.
+          git checkout main || git checkout -b main
+          git pull --ff-only origin main || true
 
-    - name: Merge upstream changes
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git merge upstream/main || echo "No upstream changes to merge"
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/github/codeql.git || true
+          git fetch upstream
 
-    - name: Push updates to fork
-      run: |
-        git push origin main
+      - name: Merge upstream changes
+        run: |
+          # Try a fast-forward first, fall back to a merge commit if needed
+          git merge --no-edit upstream/main || echo "No upstream changes to merge"
+
+      - name: Push updates to fork (using GITHUB_TOKEN)
+        run: |
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git push origin main
