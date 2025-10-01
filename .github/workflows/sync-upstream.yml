@@ -43,7 +43,8 @@ jobs:
           # Try a fast-forward first, fall back to a merge commit if needed
           git merge --no-edit upstream/main || echo "No upstream changes to merge"
 
-      - name: Push updates to fork (using GITHUB_TOKEN)
+      - name: Push updates to fork 
         run: |
-          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git remote set-url origin "https://x-access-token:${{ secrets.PAT_WORKFLOW }}@github.com/${{ github.repository }}.git"
           git push origin main
+
