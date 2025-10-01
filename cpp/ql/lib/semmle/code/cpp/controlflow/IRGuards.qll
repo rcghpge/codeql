@@ -73,6 +73,20 @@ abstract private class GuardConditionImpl extends Expr {
   abstract predicate valueControls(BasicBlock controlled, AbstractValue v);
 
   /**
+   * Holds if the control-flow edge `(pred, succ)` may be taken only if
+   * the value of this condition is `v`.
+   */
+  abstract predicate valueControlsEdge(BasicBlock pred, BasicBlock succ, AbstractValue v);
+
+  /**
+   * Holds if  the control-flow edge `(pred, succ)` may be taken only if
+   * this the value of this condition is `testIsTrue`.
+   */
+  final predicate controlsEdge(BasicBlock pred, BasicBlock succ, boolean testIsTrue) {
+    this.valueControlsEdge(pred, succ, any(BooleanValue bv | bv.getValue() = testIsTrue))
+  }
+
+  /**
    * Holds if this condition controls `controlled`, meaning that `controlled` is only
    * entered if the value of this condition is `testIsTrue`.
    *
@@ -175,6 +189,58 @@ abstract private class GuardConditionImpl extends Expr {
    */
   pragma[inline]
   abstract predicate ensuresEq(Expr e, int k, BasicBlock block, boolean areEqual);
+
+  /**
+   * Holds if (determined by this guard) `left == right + k` must be `areEqual` on the edge from
+   * `pred` to `succ`. If `areEqual = false` then this implies `left != right + k`.
+   */
+  pragma[inline]
+  final predicate ensuresEqEdge(
+    Expr left, Expr right, int k, BasicBlock pred, BasicBlock succ, boolean areEqual
+  ) {
+    exists(boolean testIsTrue |
+      this.comparesEq(left, right, k, areEqual, testIsTrue) and
+      this.controlsEdge(pred, succ, testIsTrue)
+    )
+  }
+
+  /**
+   * Holds if (determined by this guard) `e == k` must be `areEqual` on the edge from
+   * `pred` to `succ`. If `areEqual = false` then this implies `e != k`.
+   */
+  pragma[inline]
+  final predicate ensuresEqEdge(Expr e, int k, BasicBlock pred, BasicBlock succ, boolean areEqual) {
+    exists(AbstractValue v |
+      this.comparesEq(e, k, areEqual, v) and
+      this.valueControlsEdge(pred, succ, v)
+    )
+  }
+
+  /**
+   * Holds if (determined by this guard) `left < right + k` must be `isLessThan` on the edge from
+   * `pred` to `succ`. If `isLessThan = false` then this implies `left >= right + k`.
+   */
+  pragma[inline]
+  final predicate ensuresLtEdge(
+    Expr left, Expr right, int k, BasicBlock pred, BasicBlock succ, boolean isLessThan
+  ) {
+    exists(boolean testIsTrue |
+      this.comparesLt(left, right, k, isLessThan, testIsTrue) and
+      this.controlsEdge(pred, succ, testIsTrue)
+    )
+  }
+
+  /**
+   * Holds if (determined by this guard) `e < k` must be `isLessThan` on the edge from
+   * `pred` to `succ`. If `isLessThan = false` then this implies `e >= k`.
+   */
+  pragma[inline]
+  final predicate ensuresLtEdge(Expr e, int k, BasicBlock pred, BasicBlock succ, boolean isLessThan) {
+    exists(AbstractValue v |
+      this.comparesLt(e, k, isLessThan, v) and
+      this.valueControlsEdge(pred, succ, v)
+    )
+  }
 }
 
 final class GuardCondition = GuardConditionImpl;
@@ -185,6 +251,16 @@ final class GuardCondition = GuardConditionImpl;
 private class GuardConditionFromBinaryLogicalOperator extends GuardConditionImpl {
   GuardConditionFromBinaryLogicalOperator() {
     this.(BinaryLogicalOperation).getAnOperand() instanceof GuardCondition
+  }
+
+  override predicate valueControlsEdge(BasicBlock pred, BasicBlock succ, AbstractValue v) {
+    exists(BinaryLogicalOperation binop, GuardCondition lhs, GuardCondition rhs |
+      this = binop and
+      lhs = binop.getLeftOperand() and
+      rhs = binop.getRightOperand() and
+      lhs.valueControlsEdge(pred, succ, v) and
+      rhs.valueControlsEdge(pred, succ, v)
+    )
   }
 
   override predicate valueControls(BasicBlock controlled, AbstractValue v) {
@@ -274,6 +350,25 @@ private predicate controlsBlock(IRGuardCondition ir, BasicBlock controlled, Abst
   )
 }
 
+/**
+ * Holds if `ir` controls the `(pred, succ)` edge, meaning that the edge
+ * `(pred, succ)` is only taken if the value of this condition is `v`. This
+ * helper predicate does not necessarily hold for binary logical operations
+ * like `&&` and `||`.
+ * See the detailed explanation on predicate `controlsEdge`.
+ */
+private predicate controlsEdge(
+  IRGuardCondition ir, BasicBlock pred, BasicBlock succ, AbstractValue v
+) {
+  exists(IRBlock irPred, IRBlock irSucc |
+    ir.valueControlsEdge(irPred, irSucc, v) and
+    nonExcludedIRAndBasicBlock(irPred, pred) and
+    nonExcludedIRAndBasicBlock(irSucc, succ) and
+    not isUnreachedBlock(irPred) and
+    not isUnreachedBlock(irSucc)
+  )
+}
+
 private class GuardConditionFromNotExpr extends GuardConditionImpl {
   IRGuardCondition ir;
 
@@ -293,6 +388,10 @@ private class GuardConditionFromNotExpr extends GuardConditionImpl {
     // This condition must determine the flow of control; that is, this
     // node must be a top-level condition.
     controlsBlock(ir, controlled, v.getDualValue())
+  }
+
+  override predicate valueControlsEdge(BasicBlock pred, BasicBlock succ, AbstractValue v) {
+    controlsEdge(ir, pred, succ, v.getDualValue())
   }
 
   pragma[inline]
@@ -381,6 +480,10 @@ private class GuardConditionFromIR extends GuardConditionImpl {
     // This condition must determine the flow of control; that is, this
     // node must be a top-level condition.
     controlsBlock(ir, controlled, v)
+  }
+
+  override predicate valueControlsEdge(BasicBlock pred, BasicBlock succ, AbstractValue v) {
+    controlsEdge(ir, pred, succ, v)
   }
 
   pragma[inline]
@@ -936,6 +1039,77 @@ private module Cached {
     ValueNumber getUnary() { result.getAnInstruction() = instr.getUnary() }
   }
 
+  signature predicate sinkSig(Instruction instr);
+
+  private module BooleanInstruction<sinkSig/1 isSink> {
+    /**
+     * Holds if `i1` flows to `i2` in a single step and `i2` is not an
+     * instruction that produces a value of Boolean type.
+     */
+    private predicate stepToNonBoolean(Instruction i1, Instruction i2) {
+      not i2.getResultIRType() instanceof IRBooleanType and
+      (
+        i2.(CopyInstruction).getSourceValue() = i1
+        or
+        i2.(ConvertInstruction).getUnary() = i1
+        or
+        i2.(BuiltinExpectCallInstruction).getArgument(0) = i1
+      )
+    }
+
+    private predicate rev(Instruction instr) {
+      isSink(instr)
+      or
+      exists(Instruction instr1 |
+        rev(instr1) and
+        stepToNonBoolean(instr, instr1)
+      )
+    }
+
+    private predicate hasBooleanType(Instruction instr) {
+      instr.getResultIRType() instanceof IRBooleanType
+    }
+
+    private predicate fwd(Instruction instr) {
+      rev(instr) and
+      (
+        hasBooleanType(instr)
+        or
+        exists(Instruction instr0 |
+          fwd(instr0) and
+          stepToNonBoolean(instr0, instr)
+        )
+      )
+    }
+
+    private predicate prunedStep(Instruction i1, Instruction i2) {
+      fwd(i1) and
+      fwd(i2) and
+      stepToNonBoolean(i1, i2)
+    }
+
+    private predicate stepsPlus(Instruction i1, Instruction i2) =
+      doublyBoundedFastTC(prunedStep/2, hasBooleanType/1, isSink/1)(i1, i2)
+
+    /**
+     * Gets the Boolean-typed instruction that defines `instr` before any
+     * integer conversions are applied, if any.
+     */
+    Instruction get(Instruction instr) {
+      isSink(instr) and
+      (
+        result = instr
+        or
+        stepsPlus(result, instr)
+      ) and
+      hasBooleanType(result)
+    }
+  }
+
+  private predicate isUnaryComparesEqLeft(Instruction instr) {
+    unary_compares_eq(_, instr.getAUse(), 0, _, _)
+  }
+
   /**
    * Holds if `left == right + k` is `areEqual` given that test is `testIsTrue`.
    *
@@ -966,14 +1140,19 @@ private module Cached {
     )
     or
     compares_eq(test.(BuiltinExpectCallValueNumber).getCondition(), left, right, k, areEqual, value)
-  }
-
-  private predicate isConvertedBool(Instruction instr) {
-    instr.getResultIRType() instanceof IRBooleanType
     or
-    isConvertedBool(instr.(ConvertInstruction).getUnary())
-    or
-    isConvertedBool(instr.(BuiltinExpectCallInstruction).getCondition())
+    exists(Operand l, BooleanValue bv |
+      // 1. test = value -> int(l) = 0 is !bv
+      unary_compares_eq(test, l, 0, bv.getValue().booleanNot(), value) and
+      // 2. l = bv -> left + right is areEqual
+      compares_eq(valueNumber(BooleanInstruction<isUnaryComparesEqLeft/1>::get(l.getDef())), left,
+        right, k, areEqual, bv)
+      // We want this to hold:
+      // `test = value -> left + right is areEqual`
+      // Applying 2 we need to show:
+      // `test = value -> l = bv`
+      // And `l = bv` holds by `int(l) = 0 is !bv`
+    )
   }
 
   /**
@@ -1006,19 +1185,11 @@ private module Cached {
       k = k1 + k2
     )
     or
-    exists(CompareValueNumber cmp, Operand left, Operand right, AbstractValue v |
-      test = cmp and
-      pragma[only_bind_into](cmp)
-          .hasOperands(pragma[only_bind_into](left), pragma[only_bind_into](right)) and
-      isConvertedBool(left.getDef()) and
-      int_value(right.getDef()) = 0 and
-      unary_compares_eq(valueNumberOfOperand(left), op, k, areEqual, v)
-    |
-      cmp instanceof CompareNEValueNumber and
-      v = value
-      or
-      cmp instanceof CompareEQValueNumber and
-      v.getDualValue() = value
+    // See argument for why this is correct in compares_eq
+    exists(Operand l, BooleanValue bv |
+      unary_compares_eq(test, l, 0, bv.getValue().booleanNot(), value) and
+      unary_compares_eq(valueNumber(BooleanInstruction<isUnaryComparesEqLeft/1>::get(l.getDef())),
+        op, k, areEqual, bv)
     )
     or
     unary_compares_eq(test.(BuiltinExpectCallValueNumber).getCondition(), op, k, areEqual, value)
@@ -1116,40 +1287,18 @@ private module Cached {
     )
   }
 
+  private predicate isBuiltInExpectArg(Instruction instr) {
+    instr = any(BuiltinExpectCallInstruction buildinExpect).getArgument(0)
+  }
+
   /** A call to the builtin operation `__builtin_expect`. */
   private class BuiltinExpectCallInstruction extends CallInstruction {
     BuiltinExpectCallInstruction() { this.getStaticCallTarget().hasName("__builtin_expect") }
 
     /** Gets the condition of this call. */
-    Instruction getCondition() { result = this.getConditionOperand().getDef() }
-
-    Operand getConditionOperand() {
-      // The first parameter of `__builtin_expect` has type `long`. So we skip
-      // the conversion when inferring guards.
-      result = this.getArgument(0).(ConvertInstruction).getUnaryOperand()
+    Instruction getCondition() {
+      result = BooleanInstruction<isBuiltInExpectArg/1>::get(this.getArgument(0))
     }
-  }
-
-  /**
-   * Holds if `left == right + k` is `areEqual` if `cmp` evaluates to `value`,
-   * and `cmp` is an instruction that compares the value of
-   * `__builtin_expect(left == right + k, _)` to `0`.
-   */
-  private predicate builtin_expect_eq(
-    CompareValueNumber cmp, Operand left, Operand right, int k, boolean areEqual,
-    AbstractValue value
-  ) {
-    exists(BuiltinExpectCallValueNumber call, Instruction const, AbstractValue innerValue |
-      int_value(const) = 0 and
-      cmp.hasOperands(call.getAUse(), const.getAUse()) and
-      compares_eq(call.getCondition(), left, right, k, areEqual, innerValue)
-    |
-      cmp instanceof CompareNEValueNumber and
-      value = innerValue
-      or
-      cmp instanceof CompareEQValueNumber and
-      value.getDualValue() = innerValue
-    )
   }
 
   private predicate complex_eq(
@@ -1158,28 +1307,6 @@ private module Cached {
     sub_eq(cmp, left, right, k, areEqual, value)
     or
     add_eq(cmp, left, right, k, areEqual, value)
-    or
-    builtin_expect_eq(cmp, left, right, k, areEqual, value)
-  }
-
-  /**
-   * Holds if `op == k` is `areEqual` if `cmp` evaluates to `value`, and `cmp` is
-   * an instruction that compares the value of `__builtin_expect(op == k, _)` to `0`.
-   */
-  private predicate unary_builtin_expect_eq(
-    CompareValueNumber cmp, Operand op, int k, boolean areEqual, AbstractValue value
-  ) {
-    exists(BuiltinExpectCallValueNumber call, Instruction const, AbstractValue innerValue |
-      int_value(const) = 0 and
-      cmp.hasOperands(call.getAUse(), const.getAUse()) and
-      unary_compares_eq(call.getCondition(), op, k, areEqual, innerValue)
-    |
-      cmp instanceof CompareNEValueNumber and
-      value = innerValue
-      or
-      cmp instanceof CompareEQValueNumber and
-      value.getDualValue() = innerValue
-    )
   }
 
   private predicate unary_complex_eq(
@@ -1188,8 +1315,6 @@ private module Cached {
     unary_sub_eq(test, op, k, areEqual, value)
     or
     unary_add_eq(test, op, k, areEqual, value)
-    or
-    unary_builtin_expect_eq(test, op, k, areEqual, value)
   }
 
   /*
@@ -1215,6 +1340,15 @@ private module Cached {
     exists(AbstractValue dual | value = dual.getDualValue() |
       compares_lt(test.(LogicalNotValueNumber).getUnary(), left, right, k, isLt, dual)
     )
+    or
+    compares_lt(test.(BuiltinExpectCallValueNumber).getCondition(), left, right, k, isLt, value)
+    or
+    // See argument for why this is correct in compares_eq
+    exists(Operand l, BooleanValue bv |
+      unary_compares_eq(test, l, 0, bv.getValue().booleanNot(), value) and
+      compares_lt(valueNumber(BooleanInstruction<isUnaryComparesEqLeft/1>::get(l.getDef())), left,
+        right, k, isLt, bv)
+    )
   }
 
   /** Holds if `op < k` evaluates to `isLt` given that `test` evaluates to `value`. */
@@ -1233,6 +1367,15 @@ private module Cached {
       compares_lt(test, op, const.getAUse(), k2, isLt, value) and
       int_value(const) = k1 and
       k = k1 + k2
+    )
+    or
+    compares_lt(test.(BuiltinExpectCallValueNumber).getCondition(), op, k, isLt, value)
+    or
+    // See argument for why this is correct in compares_eq
+    exists(Operand l, BooleanValue bv |
+      unary_compares_eq(test, l, 0, bv.getValue().booleanNot(), value) and
+      compares_lt(valueNumber(BooleanInstruction<isUnaryComparesEqLeft/1>::get(l.getDef())), op, k,
+        isLt, bv)
     )
   }
 

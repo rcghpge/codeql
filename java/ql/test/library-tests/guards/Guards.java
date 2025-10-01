@@ -26,7 +26,7 @@ public class Guards {
     }
     int sz = a != null ? a.length : 0;
     for (int i = 0; i < sz; i++) {
-      chk(); // $ guarded='a != null:true' guarded='i < sz:true' guarded='sz:not 0' guarded='...?...:...:not 0' guarded='a.length:not 0' guarded='a:not null'
+      chk(); // $ guarded='a != null:true' guarded='i < sz:true' guarded='sz:Lower bound 1' guarded='...?...:...:Lower bound 1' guarded='a.length:Lower bound 1' guarded='a:not null'
       int e = a[i];
       if (e > 2) break;
     }
@@ -136,11 +136,80 @@ public class Guards {
         found = true;
       }
       if (found) {
-        chk(); // $ guarded=found:true guarded='i < a.length:true'
+        chk(); // $ guarded=found:true guarded='i < a.length:true' guarded='a.length:Lower bound 1'
       }
     }
     if (found) {
-      chk(); // $ guarded=found:true guarded='i < a.length:false'
+      chk(); // $ guarded=found:true guarded='i < a.length:false' guarded='i:Lower bound 0'
     }
+  }
+
+  public static boolean testNotNull1(String input) {
+    return input != null && input.length() > 0;
+  }
+
+  public static boolean testNotNull2(String input) {
+    if (input == null) return false;
+    return input.length() > 0;
+  }
+
+  public static int getNumOrDefault(Integer number) {
+    return number == null ? 0 : number;
+  }
+
+  public static String concatNonNull(String s1, String s2) {
+    if (s1 == null || s2 == null) return null;
+    return s1 + s2;
+  }
+
+  public static Status testEnumWrapper(boolean flag) {
+    return flag ? Status.SUCCESS : Status.FAILURE;
+  }
+
+  enum Status { SUCCESS, FAILURE }
+
+  void testWrappers(String s, Integer i) {
+    if (testNotNull1(s)) {
+      chk(); // $ guarded='s:not null' guarded=testNotNull1(...):true
+    } else {
+      chk(); // $ guarded=testNotNull1(...):false
+    }
+
+    if (testNotNull2(s)) {
+      chk(); // $ guarded='s:not null' guarded=testNotNull2(...):true
+    } else {
+      chk(); // $ guarded=testNotNull2(...):false
+    }
+
+    if (0 == getNumOrDefault(i)) {
+      chk(); // $ guarded='0 == getNumOrDefault(...):true' guarded='getNumOrDefault(...):0'
+    } else {
+      chk(); // $ guarded='0 == getNumOrDefault(...):false' guarded='getNumOrDefault(...):not 0' guarded='i:not 0' guarded='i:not null'
+    }
+
+    if (null == concatNonNull(s, "suffix")) {
+      chk(); // $ guarded='concatNonNull(...):null' guarded='null == concatNonNull(...):true'
+    } else {
+      chk(); // $ guarded='concatNonNull(...):not null' guarded='null == concatNonNull(...):false' guarded='s:not null'
+    }
+
+    switch (testEnumWrapper(g(1))) {
+      case SUCCESS:
+        chk(); // $ guarded='testEnumWrapper(...):SUCCESS' guarded='testEnumWrapper(...):match SUCCESS' guarded=g(1):true
+        break;
+      case FAILURE:
+        chk(); // $ guarded='testEnumWrapper(...):FAILURE' guarded='testEnumWrapper(...):match FAILURE' guarded=g(1):false
+        break;
+    }
+  }
+
+  static void ensureNotNull(Object o) throws Exception {
+    if (o == null) throw new Exception();
+  }
+
+  void testExceptionWrapper(String s) throws Exception {
+    chk(); // nothing guards here
+    ensureNotNull(s);
+    chk(); // $ guarded='ensureNotNull(...):no exception' guarded='s:not null'
   }
 }

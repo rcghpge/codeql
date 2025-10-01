@@ -50,76 +50,17 @@
 overlay[local?]
 module;
 
+private import codeql.controlflow.BasicBlock as BB
+private import codeql.controlflow.SuccessorType
 private import codeql.util.Boolean
 private import codeql.util.Location
+private import codeql.util.Unit
 
-signature module InputSig<LocationSig Location> {
-  class SuccessorType {
-    /** Gets a textual representation of this successor type. */
-    string toString();
-  }
+signature class TypSig;
 
-  class ExceptionSuccessor extends SuccessorType;
-
-  class ConditionalSuccessor extends SuccessorType {
-    /** Gets the Boolean value of this successor. */
-    boolean getValue();
-  }
-
-  class BooleanSuccessor extends ConditionalSuccessor;
-
-  class NullnessSuccessor extends ConditionalSuccessor;
-
-  /** A control flow node. */
-  class ControlFlowNode {
-    /** Gets a textual representation of this control flow node. */
-    string toString();
-
-    /** Gets the location of this control flow node. */
-    Location getLocation();
-  }
-
-  /**
-   * A basic block, that is, a maximal straight-line sequence of control flow nodes
-   * without branches or joins.
-   */
-  class BasicBlock {
-    /** Gets a textual representation of this basic block. */
-    string toString();
-
-    /** Gets the `i`th node in this basic block. */
-    ControlFlowNode getNode(int i);
-
-    /** Gets the last control flow node in this basic block. */
-    ControlFlowNode getLastNode();
-
-    /** Gets the length of this basic block. */
-    int length();
-
-    /** Gets the location of this basic block. */
-    Location getLocation();
-
-    BasicBlock getASuccessor(SuccessorType t);
-
-    predicate dominates(BasicBlock bb);
-
-    predicate strictlyDominates(BasicBlock bb);
-  }
-
-  /**
-   * Holds if `bb1` has `bb2` as a direct successor and the edge between `bb1`
-   * and `bb2` is a dominating edge.
-   *
-   * An edge `(bb1, bb2)` is dominating if there exists a basic block that can
-   * only be reached from the entry block by going through `(bb1, bb2)`. This
-   * implies that `(bb1, bb2)` dominates its endpoint `bb2`. I.e., `bb2` can
-   * only be reached from the entry block by going via `(bb1, bb2)`.
-   *
-   * This is a necessary and sufficient condition for an edge to dominate some
-   * block, and therefore `dominatingEdge(bb1, bb2) and bb2.dominates(bb3)`
-   * means that the edge `(bb1, bb2)` dominates `bb3`.
-   */
-  predicate dominatingEdge(BasicBlock bb1, BasicBlock bb2);
+signature module InputSig<LocationSig Location, TypSig ControlFlowNode, TypSig BasicBlock> {
+  /** A control flow node indicating normal termination of a callable. */
+  class NormalExitNode extends ControlFlowNode;
 
   class AstNode {
     /** Gets a textual representation of this AST node. */
@@ -207,10 +148,56 @@ signature module InputSig<LocationSig Location> {
     /** Gets the false branch of this expression. */
     Expr getElse();
   }
+
+  class Parameter {
+    /** Gets a textual representation of this parameter. */
+    string toString();
+
+    /** Gets the location of this parameter. */
+    Location getLocation();
+  }
+
+  class ParameterPosition {
+    /** Gets a textual representation of this element. */
+    bindingset[this]
+    string toString();
+  }
+
+  class ArgumentPosition {
+    /** Gets a textual representation of this element. */
+    bindingset[this]
+    string toString();
+  }
+
+  /**
+   * Holds if the parameter position `ppos` matches the argument position
+   * `apos`.
+   */
+  predicate parameterMatch(ParameterPosition ppos, ArgumentPosition apos);
+
+  /** A non-overridable method. */
+  class NonOverridableMethod {
+    Parameter getParameter(ParameterPosition ppos);
+
+    /** Gets an expression being returned by this method. */
+    Expr getAReturnExpr();
+  }
+
+  class NonOverridableMethodCall extends Expr {
+    NonOverridableMethod getMethod();
+
+    Expr getArgument(ArgumentPosition apos);
+  }
 }
 
 /** Provides guards-related predicates and classes. */
-module Make<LocationSig Location, InputSig<Location> Input> {
+module Make<
+  LocationSig Location, BB::CfgSig<Location> Cfg,
+  InputSig<Location, Cfg::ControlFlowNode, Cfg::BasicBlock> Input>
+{
+  private module Cfg_ = Cfg;
+
+  private import Cfg_
   private import Input
 
   private newtype TAbstractSingleValue =
@@ -221,6 +208,12 @@ module Make<LocationSig Location, InputSig<Location> Input> {
 
   private newtype TGuardValue =
     TValue(TAbstractSingleValue val, Boolean isVal) or
+    TIntRange(int bound, Boolean upper) {
+      exists(ConstantExpr c | c.asIntegerValue() + [-1, 0, 1] = bound) and
+      // exclude edge cases to avoid overflow issues when computing duals
+      bound != 2147483647 and
+      bound != -2147483648
+    } or
     TException(Boolean throws)
 
   private class AbstractSingleValue extends TAbstractSingleValue {
@@ -251,11 +244,23 @@ module Make<LocationSig Location, InputSig<Location> Input> {
         result = TValue(val, isVal.booleanNot())
       )
       or
+      exists(int bound, int d, boolean upper |
+        upper = true and d = 1
+        or
+        upper = false and d = -1
+      |
+        this = TIntRange(bound, pragma[only_bind_into](upper)) and
+        result = TIntRange(bound + d, pragma[only_bind_into](upper.booleanNot()))
+      )
+      or
       exists(boolean throws |
         this = TException(throws) and
         result = TException(throws.booleanNot())
       )
     }
+
+    /** Holds if this value represents a single concrete value. */
+    predicate isSingleton() { this = TValue(_, true) }
 
     /** Holds if this value represents `null`. */
     predicate isNullValue() { this.isNullness(true) }
@@ -275,6 +280,14 @@ module Make<LocationSig Location, InputSig<Location> Input> {
     /** Gets the constant that this value represents, if any. */
     ConstantValue asConstantValue() { this = TValue(TValueConstant(result), true) }
 
+    /**
+     * Holds if this value represents an integer range.
+     *
+     * If `upper = true` the range is `(-infinity, bound]`.
+     * If `upper = false` the range is `[bound, infinity)`.
+     */
+    predicate isIntRange(int bound, boolean upper) { this = TIntRange(bound, upper) }
+
     /** Holds if this value represents throwing an exception. */
     predicate isThrowsException() { this = TException(true) }
 
@@ -286,6 +299,12 @@ module Make<LocationSig Location, InputSig<Location> Input> {
         this = TValue(val, true) and result = val.toString()
         or
         this = TValue(val, false) and result = "not " + val.toString()
+      )
+      or
+      exists(int bound |
+        this = TIntRange(bound, true) and result = "Upper bound " + bound.toString()
+        or
+        this = TIntRange(bound, false) and result = "Lower bound " + bound.toString()
       )
       or
       exists(boolean throws | this = TException(throws) |
@@ -305,6 +324,24 @@ module Make<LocationSig Location, InputSig<Location> Input> {
       a = TValue(a1, true) and
       b = TValue(b1, true) and
       a1 != b1
+    )
+    or
+    exists(int upperbound, int lowerbound |
+      a = TIntRange(upperbound, true) and b = TIntRange(lowerbound, false)
+      or
+      b = TIntRange(upperbound, true) and a = TIntRange(lowerbound, false)
+    |
+      upperbound < lowerbound
+    )
+    or
+    exists(int bound, boolean upper, int k |
+      a = TIntRange(bound, upper) and b.asIntValue() = k
+      or
+      b = TIntRange(bound, upper) and a.asIntValue() = k
+    |
+      upper = true and bound < k
+      or
+      upper = false and bound > k
     )
   }
 
@@ -480,6 +517,8 @@ module Make<LocationSig Location, InputSig<Location> Input> {
     )
   }
 
+  private predicate normalExitBlock(BasicBlock bb) { bb.getNode(_) instanceof NormalExitNode }
+
   signature module LogicInputSig {
     class SsaDefinition {
       /** Gets the basic block to which this SSA definition belongs. */
@@ -503,6 +542,8 @@ module Make<LocationSig Location, InputSig<Location> Input> {
       predicate hasInputFromBlock(SsaDefinition inp, BasicBlock bb);
     }
 
+    predicate parameterDefinition(Parameter p, SsaDefinition def);
+
     /**
      * Holds if `guard` evaluating to `val` ensures that:
      * `e <= k` when `upper = true`
@@ -525,8 +566,6 @@ module Make<LocationSig Location, InputSig<Location> Input> {
      * Holds if the assumption that `g1` has been evaluated to `v1` implies that
      * `g2` has been evaluated to `v2`, that is, the evaluation of `g2` to `v2`
      * dominates the evaluation of `g1` to `v1`.
-     *
-     * This predicate can be instantiated with `CustomGuard<..>::additionalImpliesStep`.
      */
     default predicate additionalImpliesStep(PreGuard g1, GuardValue v1, PreGuard g2, GuardValue v2) {
       none()
@@ -692,38 +731,22 @@ module Make<LocationSig Location, InputSig<Location> Input> {
       )
     }
 
-    /** Holds if `e` may take the value `k` */
-    private predicate relevantInt(Expr e, int k) {
-      e.(ConstantExpr).asIntegerValue() = k
-      or
-      relevantInt(any(Expr e1 | valueStep(e1, e)), k)
-      or
-      exists(SsaDefinition def |
-        guardReadsSsaVar(e, def) and
-        relevantInt(getAnUltimateDefinition(def, _).(SsaWriteDefinition).getDefinition(), k)
-      )
-    }
-
     private predicate impliesStep1(Guard g1, GuardValue v1, Guard g2, GuardValue v2) {
       baseImpliesStep(g1, v1, g2, v2)
       or
-      exists(SsaDefinition def, Expr e |
+      exists(SsaDefinition def, Expr e, BasicBlock bb1 |
         // If `def = g2 ? v1 : ...` and all other assignments to `def` are different from
         // `v1` then a guard proving `def == v1` ensures that `g2` evaluates to `v2`.
         uniqueValue(def, e, v1) and
         guardReadsSsaVar(g1, def) and
         g2.directlyValueControls(e.getBasicBlock(), v2) and
-        not g2.directlyValueControls(g1.getBasicBlock(), v2)
+        bb1 = g1.getBasicBlock() and
+        not g2.directlyValueControls(bb1, v2)
       )
       or
-      exists(int k1, int k2, boolean upper |
-        rangeGuard(g1, v1, g2, k1, upper) and
-        relevantInt(g2, k2) and
-        v2 = TValue(TValueInt(k2), false)
-      |
-        upper = true and k1 < k2 // g2 <= k1 < k2  ==>  g2 != k2
-        or
-        upper = false and k1 > k2 // g2 >= k1 > k2  ==>  g2 != k2
+      exists(int k, boolean upper |
+        rangeGuard(g1, v1, g2, k, upper) and
+        v2 = TIntRange(k, upper)
       )
       or
       exists(boolean isNull |
@@ -754,6 +777,10 @@ module Make<LocationSig Location, InputSig<Location> Input> {
       e instanceof NonNullExpr and v.isNonNullValue()
       or
       exprHasValue(e.(IdExpr).getEqualChildExpr(), v)
+      or
+      exists(ConditionalExpr cond | cond = e |
+        exprHasValue(cond.getThen(), v) and exprHasValue(cond.getElse(), v)
+      )
       or
       exists(SsaDefinition def, Guard g, GuardValue gv |
         e = def.getARead() and
@@ -827,83 +854,85 @@ module Make<LocationSig Location, InputSig<Location> Input> {
 
     private signature predicate baseGuardValueSig(Guard guard, GuardValue v);
 
-    /**
-     * Calculates the transitive closure of all the guard implication steps
-     * starting from a given set of base cases.
-     */
     cached
-    private module ImpliesTC<baseGuardValueSig/2 baseGuardValue> {
+    private module Cached {
       /**
-       * Holds if `tgtGuard` evaluating to `tgtVal` implies that `guard`
-       * evaluates to `v`.
+       * Calculates the transitive closure of all the guard implication steps
+       * starting from a given set of base cases.
        */
-      pragma[nomagic]
       cached
-      predicate guardControls(Guard guard, GuardValue v, Guard tgtGuard, GuardValue tgtVal) {
-        baseGuardValue(tgtGuard, tgtVal) and
-        guard = tgtGuard and
-        v = tgtVal
-        or
-        exists(Guard g0, GuardValue v0 |
-          guardControls(g0, v0, tgtGuard, tgtVal) and
-          impliesStep2(g0, v0, guard, v)
-        )
-        or
-        exists(Guard g0, GuardValue v0 |
-          guardControls(g0, v0, tgtGuard, tgtVal) and
-          unboundImpliesStep(g0, v0, guard, v)
-        )
-        or
-        exists(SsaDefinition def0, GuardValue v0 |
-          ssaControls(def0, v0, tgtGuard, tgtVal) and
-          impliesStepSsaGuard(def0, v0, guard, v)
-        )
-        or
-        exists(Guard g0, GuardValue v0 |
-          guardControls(g0, v0, tgtGuard, tgtVal) and
-          additionalImpliesStep(g0, v0, guard, v)
-        )
+      module ImpliesTC<baseGuardValueSig/2 baseGuardValue> {
+        /**
+         * Holds if `tgtGuard` evaluating to `tgtVal` implies that `guard`
+         * evaluates to `v`.
+         */
+        pragma[nomagic]
+        cached
+        predicate guardControls(Guard guard, GuardValue v, Guard tgtGuard, GuardValue tgtVal) {
+          baseGuardValue(tgtGuard, tgtVal) and
+          guard = tgtGuard and
+          v = tgtVal
+          or
+          exists(Guard g0, GuardValue v0 |
+            guardControls(g0, v0, tgtGuard, tgtVal) and
+            impliesStep2(g0, v0, guard, v)
+          )
+          or
+          exists(Guard g0, GuardValue v0 |
+            guardControls(g0, v0, tgtGuard, tgtVal) and
+            unboundImpliesStep(g0, v0, guard, v)
+          )
+          or
+          exists(SsaDefinition def0, GuardValue v0 |
+            ssaControls(def0, v0, tgtGuard, tgtVal) and
+            impliesStepSsaGuard(def0, v0, guard, v)
+          )
+          or
+          exists(Guard g0, GuardValue v0 |
+            guardControls(g0, v0, tgtGuard, tgtVal) and
+            WrapperGuard::wrapperImpliesStep(g0, v0, guard, v)
+          )
+          or
+          exists(Guard g0, GuardValue v0 |
+            guardControls(g0, v0, tgtGuard, tgtVal) and
+            additionalImpliesStep(g0, v0, guard, v)
+          )
+        }
+
+        /**
+         * Holds if `tgtGuard` evaluating to `tgtVal` implies that `def`
+         * evaluates to `v`.
+         */
+        pragma[nomagic]
+        cached
+        predicate ssaControls(SsaDefinition def, GuardValue v, Guard tgtGuard, GuardValue tgtVal) {
+          exists(Guard g0 |
+            guardControls(g0, v, tgtGuard, tgtVal) and
+            guardReadsSsaVar(g0, def)
+          )
+          or
+          exists(SsaDefinition def0 |
+            ssaControls(def0, v, tgtGuard, tgtVal) and
+            impliesStepSsa(def0, v, def)
+          )
+        }
       }
 
       /**
-       * Holds if `tgtGuard` evaluating to `tgtVal` implies that `def`
-       * evaluates to `v`.
+       * Holds if `guard` evaluating to `v` implies that `e` is guaranteed to be
+       * null if `isNull` is true, and non-null if `isNull` is false.
        */
-      pragma[nomagic]
       cached
-      predicate ssaControls(SsaDefinition def, GuardValue v, Guard tgtGuard, GuardValue tgtVal) {
-        exists(Guard g0 |
-          guardControls(g0, v, tgtGuard, tgtVal) and
-          guardReadsSsaVar(g0, def)
-        )
-        or
-        exists(SsaDefinition def0 |
-          ssaControls(def0, v, tgtGuard, tgtVal) and
-          impliesStepSsa(def0, v, def)
-        )
+      predicate nullGuard(Guard guard, GuardValue v, Expr e, boolean isNull) {
+        impliesStep2(guard, v, e, any(GuardValue gv | gv.isNullness(isNull))) or
+        WrapperGuard::wrapperImpliesStep(guard, v, e, any(GuardValue gv | gv.isNullness(isNull))) or
+        additionalImpliesStep(guard, v, e, any(GuardValue gv | gv.isNullness(isNull)))
       }
     }
 
-    private predicate booleanGuard(Guard guard, GuardValue val) {
-      exists(guard) and exists(val.asBooleanValue())
-    }
+    private import Cached
 
-    private module BooleanImplies = ImpliesTC<booleanGuard/2>;
-
-    /** INTERNAL: Don't use. */
-    predicate boolImplies(Guard g1, GuardValue v1, Guard g2, GuardValue v2) {
-      BooleanImplies::guardControls(g2, v2, g1, v1) and
-      g2 != g1
-    }
-
-    /**
-     * Holds if `guard` evaluating to `v` implies that `e` is guaranteed to be
-     * null if `isNull` is true, and non-null if `isNull` is false.
-     */
-    predicate nullGuard(Guard guard, GuardValue v, Expr e, boolean isNull) {
-      impliesStep2(guard, v, e, any(GuardValue gv | gv.isNullness(isNull))) or
-      additionalImpliesStep(guard, v, e, any(GuardValue gv | gv.isNullness(isNull)))
-    }
+    predicate nullGuard = Cached::nullGuard/4;
 
     private predicate hasAValueBranchEdge(Guard guard, GuardValue v) {
       guard.hasValueBranchEdge(_, _, v)
@@ -944,61 +973,45 @@ module Make<LocationSig Location, InputSig<Location> Input> {
       )
     }
 
-    signature module CustomGuardInputSig {
-      class ParameterPosition {
-        /** Gets a textual representation of this element. */
-        bindingset[this]
-        string toString();
-      }
-
-      class ArgumentPosition {
-        /** Gets a textual representation of this element. */
-        bindingset[this]
-        string toString();
-      }
-
-      /**
-       * Holds if the parameter position `ppos` matches the argument position
-       * `apos`.
-       */
-      predicate parameterMatch(ParameterPosition ppos, ArgumentPosition apos);
-
-      /** A non-overridable method with a boolean return value. */
-      class BooleanMethod {
-        SsaDefinition getParameter(ParameterPosition ppos);
-
-        Expr getAReturnExpr();
-      }
-
-      class BooleanMethodCall extends Expr {
-        BooleanMethod getMethod();
-
-        Expr getArgument(ArgumentPosition apos);
-      }
-    }
-
     /**
-     * Provides an implementation of guard implication logic for custom
-     * wrappers. This can be used to instantiate the `additionalImpliesStep`
-     * predicate.
+     * Provides an implementation of guard implication logic for guard
+     * wrappers.
      */
-    module CustomGuard<CustomGuardInputSig CustomGuardInput> {
-      private import CustomGuardInput
-
+    private module WrapperGuard {
       final private class FinalExpr = Expr;
 
-      private class ReturnExpr extends FinalExpr {
-        ReturnExpr() { any(BooleanMethod m).getAReturnExpr() = this }
+      class ReturnExpr extends FinalExpr {
+        ReturnExpr() { any(NonOverridableMethod m).getAReturnExpr() = this }
+
+        NonOverridableMethod getMethod() { result.getAReturnExpr() = this }
 
         pragma[nomagic]
         BasicBlock getBasicBlock() { result = super.getBasicBlock() }
       }
 
-      private predicate booleanReturnGuard(Guard guard, GuardValue val) {
-        guard instanceof ReturnExpr and exists(val.asBooleanValue())
+      private predicate relevantCallValue(NonOverridableMethodCall call, GuardValue val) {
+        BranchImplies::guardControls(call, val, _, _) or
+        ReturnImplies::guardControls(call, val, _, _)
       }
 
-      private module ReturnImplies = ImpliesTC<booleanReturnGuard/2>;
+      predicate relevantReturnValue(NonOverridableMethod m, GuardValue val) {
+        exists(NonOverridableMethodCall call |
+          relevantCallValue(call, val) and
+          call.getMethod() = m and
+          not val instanceof TException
+        )
+      }
+
+      private predicate returnGuard(Guard guard, GuardValue val) {
+        relevantReturnValue(guard.(ReturnExpr).getMethod(), val)
+      }
+
+      module ReturnImplies = ImpliesTC<returnGuard/2>;
+
+      pragma[nomagic]
+      private predicate directlyControlsReturn(Guard guard, GuardValue val, ReturnExpr ret) {
+        guard.directlyValueControls(ret.getBasicBlock(), val)
+      }
 
       /**
        * Holds if `ret` is a return expression in a non-overridable method that
@@ -1006,34 +1019,52 @@ module Make<LocationSig Location, InputSig<Location> Input> {
        * parameter has the value `val`.
        */
       private predicate validReturnInCustomGuard(
-        ReturnExpr ret, ParameterPosition ppos, boolean retval, GuardValue val
+        ReturnExpr ret, ParameterPosition ppos, GuardValue retval, GuardValue val
       ) {
-        exists(BooleanMethod m, SsaDefinition param |
+        exists(NonOverridableMethod m, SsaDefinition param |
           m.getAReturnExpr() = ret and
-          m.getParameter(ppos) = param
+          parameterDefinition(m.getParameter(ppos), param)
         |
           exists(Guard g0, GuardValue v0 |
-            g0.directlyValueControls(ret.getBasicBlock(), v0) and
+            directlyControlsReturn(g0, v0, ret) and
             BranchImplies::ssaControls(param, val, g0, v0) and
-            retval = [true, false]
+            relevantReturnValue(m, retval)
           )
           or
-          ReturnImplies::ssaControls(param, val, ret,
-            any(GuardValue r | r.asBooleanValue() = retval))
+          ReturnImplies::ssaControls(param, val, ret, retval)
+        )
+      }
+
+      private predicate guardDirectlyControlsExit(Guard guard, GuardValue val) {
+        exists(BasicBlock bb |
+          guard.directlyValueControls(bb, val) and
+          normalExitBlock(bb)
         )
       }
 
       /**
-       * Gets a non-overridable method with a boolean return value that performs a check
-       * on the `ppos`th parameter. A return value equal to `retval` allows us to conclude
+       * Gets a non-overridable method that performs a check on the `ppos`th
+       * parameter. A return value equal to `retval` allows us to conclude
        * that the argument has the value `val`.
        */
-      private BooleanMethod customGuard(ParameterPosition ppos, boolean retval, GuardValue val) {
+      private NonOverridableMethod wrapperGuard(
+        ParameterPosition ppos, GuardValue retval, GuardValue val
+      ) {
         forex(ReturnExpr ret |
           result.getAReturnExpr() = ret and
-          not ret.(ConstantExpr).asBooleanValue() = retval.booleanNot()
+          not exists(GuardValue notRetval |
+            exprHasValue(ret, notRetval) and
+            disjointValues(notRetval, retval)
+          )
         |
           validReturnInCustomGuard(ret, ppos, retval, val)
+        )
+        or
+        exists(SsaDefinition param, Guard g0, GuardValue v0 |
+          parameterDefinition(result.getParameter(ppos), param) and
+          guardDirectlyControlsExit(g0, v0) and
+          retval = TException(false) and
+          BranchImplies::ssaControls(param, val, g0, v0)
         )
       }
 
@@ -1043,14 +1074,122 @@ module Make<LocationSig Location, InputSig<Location> Input> {
        * dominates the evaluation of `g1` to `v1`.
        *
        * This predicate covers the implication steps that arise from calls to
-       * custom guard wrappers.
+       * guard wrappers.
        */
-      predicate additionalImpliesStep(PreGuard g1, GuardValue v1, PreGuard g2, GuardValue v2) {
-        exists(BooleanMethodCall call, ParameterPosition ppos, ArgumentPosition apos |
+      predicate wrapperImpliesStep(PreGuard g1, GuardValue v1, PreGuard g2, GuardValue v2) {
+        exists(NonOverridableMethodCall call, ParameterPosition ppos, ArgumentPosition apos |
           g1 = call and
-          call.getMethod() = customGuard(ppos, v1.asBooleanValue(), v2) and
+          call.getMethod() = wrapperGuard(ppos, v1, v2) and
           call.getArgument(apos) = g2 and
+          parameterMatch(pragma[only_bind_out](ppos), pragma[only_bind_out](apos)) and
+          not exprHasValue(g2, v2) // disregard trivial guard
+        )
+      }
+    }
+
+    signature predicate guardChecksSig(Guard g, Expr e, boolean branch);
+
+    bindingset[this]
+    signature class StateSig;
+
+    private module WithState<StateSig State> {
+      signature predicate guardChecksSig(Guard g, Expr e, boolean branch, State state);
+    }
+
+    /**
+     * Extends a `BarrierGuard` input predicate with wrapped invocations.
+     */
+    module ValidationWrapper<guardChecksSig/3 guardChecks0> {
+      private predicate guardChecksWithState(Guard g, Expr e, boolean branch, Unit state) {
+        guardChecks0(g, e, branch) and exists(state)
+      }
+
+      private module StatefulWrapper = ValidationWrapperWithState<Unit, guardChecksWithState/4>;
+
+      /**
+       * Holds if the guard `g` validates the SSA definition `def` upon evaluating to `val`.
+       */
+      predicate guardChecksDef(Guard g, SsaDefinition def, GuardValue val) {
+        StatefulWrapper::guardChecksDef(g, def, val, _)
+      }
+    }
+
+    /**
+     * Extends a `BarrierGuard` input predicate with wrapped invocations.
+     */
+    module ValidationWrapperWithState<
+      StateSig State, WithState<State>::guardChecksSig/4 guardChecks0>
+    {
+      private import WrapperGuard
+
+      /**
+       * Holds if `ret` is a return expression in a non-overridable method that
+       * on a return value of `retval` allows the conclusion that the `ppos`th
+       * parameter has been validated by the given guard.
+       */
+      private predicate validReturnInValidationWrapper(
+        ReturnExpr ret, ParameterPosition ppos, GuardValue retval, State state
+      ) {
+        exists(NonOverridableMethod m, SsaDefinition param, Guard guard, GuardValue val |
+          m.getAReturnExpr() = ret and
+          parameterDefinition(m.getParameter(ppos), param) and
+          guardChecksDef(guard, param, val, state)
+        |
+          guard.valueControls(ret.getBasicBlock(), val) and
+          relevantReturnValue(m, retval)
+          or
+          ReturnImplies::guardControls(guard, val, ret, retval)
+        )
+      }
+
+      /**
+       * Gets a non-overridable method that performs a check on the `ppos`th
+       * parameter. A return value equal to `retval` allows us to conclude
+       * that the argument has been validated by the given guard.
+       */
+      private NonOverridableMethod validationWrapper(
+        ParameterPosition ppos, GuardValue retval, State state
+      ) {
+        forex(ReturnExpr ret |
+          result.getAReturnExpr() = ret and
+          not exists(GuardValue notRetval |
+            exprHasValue(ret, notRetval) and
+            disjointValues(notRetval, retval)
+          )
+        |
+          validReturnInValidationWrapper(ret, ppos, retval, state)
+        )
+        or
+        exists(SsaDefinition param, BasicBlock bb, Guard guard, GuardValue val |
+          parameterDefinition(result.getParameter(ppos), param) and
+          guardChecksDef(guard, param, val, state) and
+          guard.valueControls(bb, val) and
+          normalExitBlock(bb) and
+          retval = TException(false)
+        )
+      }
+
+      /**
+       * Holds if the guard `g` validates the expression `e` upon evaluating to `val`.
+       */
+      private predicate guardChecks(Guard g, Expr e, GuardValue val, State state) {
+        guardChecks0(g, e, val.asBooleanValue(), state)
+        or
+        exists(NonOverridableMethodCall call, ParameterPosition ppos, ArgumentPosition apos |
+          g = call and
+          call.getMethod() = validationWrapper(ppos, val, state) and
+          call.getArgument(apos) = e and
           parameterMatch(pragma[only_bind_out](ppos), pragma[only_bind_out](apos))
+        )
+      }
+
+      /**
+       * Holds if the guard `g` validates the SSA definition `def` upon evaluating to `val`.
+       */
+      predicate guardChecksDef(Guard g, SsaDefinition def, GuardValue val, State state) {
+        exists(Expr e |
+          guardChecks(g, e, val, state) and
+          guardReadsSsaVar(e, def)
         )
       }
     }
@@ -1111,6 +1250,17 @@ module Make<LocationSig Location, InputSig<Location> Input> {
       predicate controls(BasicBlock bb, boolean branch) {
         this.valueControls(bb, any(GuardValue gv | gv.asBooleanValue() = branch))
       }
+    }
+
+    private predicate exprHasValueAlias = exprHasValue/2;
+
+    private predicate disjointValuesAlias = disjointValues/2;
+
+    /** Provides utility predicates for working with `GuardValue`s. */
+    module InternalUtil {
+      predicate exprHasValue = exprHasValueAlias/2;
+
+      predicate disjointValues = disjointValuesAlias/2;
     }
   }
 }

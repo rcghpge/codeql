@@ -75,21 +75,7 @@ class SliceTypeReprMention extends TypeMention instanceof SliceTypeRepr {
   }
 }
 
-/** Holds if `path` is used as a type mention during type inference. */
-predicate relevantPathTypeMention(Path path) {
-  path =
-    [
-      any(PathTypeRepr r).getPath(),
-      any(StructExpr s).getPath().getQualifier*(),
-      any(CallExpr ce).getFunction().(PathExpr).getPath().getQualifier*(),
-      any(StructPat p).getPath(),
-      any(TupleStructPat p).getPath()
-    ]
-}
-
-abstract class PathTypeMention extends TypeMention, Path {
-  PathTypeMention() { relevantPathTypeMention(this) }
-}
+abstract class PathTypeMention extends TypeMention, Path { }
 
 class AliasPathTypeMention extends PathTypeMention {
   TypeAlias resolved;
@@ -196,7 +182,7 @@ class NonAliasPathTypeMention extends PathTypeMention {
   private TypeMention getTypeMentionForTypeParameter(TypeParameter tp) {
     exists(int i |
       result = this.getPositionalTypeArgument(pragma[only_bind_into](i)) and
-      tp = this.resolveRootType().getTypeParameter(pragma[only_bind_into](i))
+      tp = this.resolveRootType().getPositionalTypeParameter(pragma[only_bind_into](i))
     )
     or
     exists(TypeAlias alias |
@@ -241,7 +227,8 @@ class NonAliasPathTypeMention extends PathTypeMention {
     )
   }
 
-  Type resolveRootType() {
+  pragma[nomagic]
+  private Type resolveRootType() {
     result = TStruct(resolved)
     or
     result = TEnum(resolved)
@@ -253,6 +240,8 @@ class NonAliasPathTypeMention extends PathTypeMention {
       then result = TSelfTypeParameter(trait)
       else result = TTrait(trait)
     )
+    or
+    result = TUnion(resolved)
     or
     result = TTypeParamTypeParameter(resolved)
     or
@@ -397,6 +386,22 @@ class DynTypeBoundListMention extends TypeMention instanceof TypeBoundList {
       trait = tp.getTrait() and
       path = TypePath::singleton(tp) and
       result = tp.getTraitTypeParameter()
+    )
+  }
+}
+
+class NeverTypeReprMention extends TypeMention, NeverTypeRepr {
+  override Type resolveTypeAt(TypePath path) { result = TNeverType() and path.isEmpty() }
+}
+
+class PtrTypeReprMention extends TypeMention instanceof PtrTypeRepr {
+  override Type resolveTypeAt(TypePath path) {
+    path.isEmpty() and
+    result = TPtrType()
+    or
+    exists(TypePath suffix |
+      result = super.getTypeRepr().(TypeMention).resolveTypeAt(suffix) and
+      path = TypePath::cons(TPtrTypeParameter(), suffix)
     )
   }
 }
